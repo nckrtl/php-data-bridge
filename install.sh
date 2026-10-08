@@ -53,7 +53,8 @@ find_fpm_binaries() {
     local dir file
     for dir in /usr/sbin /usr/local/sbin /opt/homebrew/sbin /opt/homebrew/opt/php*/sbin /usr/local/opt/php*/sbin; do
         for file in "$dir"/php-fpm*; do
-            [ -x "$file" ] && [ ! -d "$file" ] && say "$file"
+            # Homebrew links one binary from several places: list it once.
+            [ -x "$file" ] && [ ! -d "$file" ] && { readlink -f "$file" 2>/dev/null || say "$file"; }
         done
     done | sort -u
 }
