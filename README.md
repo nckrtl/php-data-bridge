@@ -66,22 +66,26 @@ An optional `php-data-bridge.json` next to the app's `composer.json`:
 
 A `tools` section is for the toolbar that shows the data. The bridge ignores it.
 
-## Setup (PHP-FPM, Sury packages)
+## Install
+
+`install.sh` sets the bridge up for every PHP-FPM version on the machine:
 
 ```bash
-sudo apt-get install php8.5-opentelemetry
-sudo phpdismod -v 8.5 -s cli opentelemetry
+./install.sh --source .            # from this checkout
+./install.sh --php 8.5 --dry-run   # one version, show only
+./install.sh --uninstall
 ```
 
-Copy `bridge/` to the server, then point PHP-FPM at it, for example in
-`/etc/php/8.5/fpm/conf.d/99-php-data-bridge.ini`:
+Per version it checks that PHP-FPM loads the OpenTelemetry extension (and installs
+`phpX.Y-opentelemetry` with apt when missing, for PHP-FPM only), then writes
+`99-php-data-bridge.ini` to PHP-FPM's own ini folder and reloads it. The CLI is not touched.
+It skips a version that already has another `auto_prepend_file`.
 
-```ini
-auto_prepend_file = /usr/local/share/php-data-bridge/bridge/prepend.php
-```
+The bridge goes to `/usr/local/share/php-data-bridge/<version>`, with `current` pointing at
+it. The ini line is written only after the files are in place and removed before them:
+PHP refuses every request when that file is missing.
 
-Reload PHP-FPM. If that file is missing, PHP refuses every request, so add and remove the
-ini line and the files together.
+Without `--source`, the script downloads a release from GitHub. That needs published releases.
 
 ## Testing without a web server
 
