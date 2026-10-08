@@ -6,7 +6,7 @@ namespace PhpDataBridge;
 
 /**
  * Builds the toolbar payload (the shape nckrtl/laravel-toolbar sends and T3 Code reads) and
- * adds it to the response: in the page for HTML, in an `x-toolbar` header for XHR.
+ * adds it to the response: in the page for HTML, in an `x-toolbar` header for everything else.
  */
 final class Payload
 {
@@ -23,7 +23,7 @@ final class Payload
 
         Store::save($id, $data);
 
-        if (self::isXhr($request)) {
+        if (self::wantsHeader($request, $response)) {
             self::attachHeader($response, $data, $request);
         } else {
             self::injectHtml($response, $data);
@@ -276,6 +276,25 @@ final class Payload
             || $request->headers->has('X-Livewire');
     }
 
+    /**
+     * XHR, non-HTML responses (API calls), and requests that send `X-Toolbar` (API clients such
+     * as Yaak, so an HTML response keeps its body as the app sent it) get the payload in a header.
+     */
+    private static function wantsHeader(object $request, object $response): bool
+    {
+        return self::isXhr($request)
+            || $request->headers->has('X-Toolbar')
+            || ! self::isHtml($response);
+    }
+
+    /** Responses without a Content-Type count as HTML, as PHP sends them as text/html. */
+    private static function isHtml(object $response): bool
+    {
+        $type = (string) $response->headers->get('Content-Type');
+
+        return $type === '' || str_contains($type, 'html');
+    }
+
     private static function attachHeader(object $response, array $data, object $request): void
     {
         // A full Inertia visit makes a new page: like the package, start the history over.
@@ -300,10 +319,9 @@ final class Payload
 
     private static function injectHtml(object $response, array $data): void
     {
-        $type = (string) $response->headers->get('Content-Type');
         $content = $response->getContent();
 
-        if (($type !== '' && ! str_contains($type, 'html')) || ! is_string($content)) {
+        if (! self::isHtml($response) || ! is_string($content)) {
             return;
         }
 

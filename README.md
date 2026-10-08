@@ -8,8 +8,10 @@ so T3 Code shows it as it shows the package's data:
 
 - HTML pages get `window.__LARAVEL_TOOLBAR_DATA__` and a small script that turns
   `x-toolbar` headers into `laravel-toolbar:update` events.
-- XHR, Inertia and Livewire responses get an `x-toolbar` header. Payloads over 32 KB send
-  an `x-toolbar-summary` row instead.
+- XHR, Inertia and Livewire responses, non-HTML responses (JSON APIs, files), and requests
+  that send an `X-Toolbar` header get an `x-toolbar` header. API clients such as Yaak send
+  `X-Toolbar` to get the data without a script in an HTML body. Payloads over 32 KB send an
+  `x-toolbar-summary` row instead.
 - `GET /_toolbar/requests/{id}` returns earlier requests. The bridge answers it before the app boots.
 
 The bridge does nothing:
