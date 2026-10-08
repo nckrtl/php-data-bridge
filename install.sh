@@ -61,7 +61,22 @@ find_fpm_binaries() {
 fpm_version() { "$1" -v 2>/dev/null | head -1 | sed -E 's/^PHP ([0-9]+\.[0-9]+).*/\1/'; }
 fpm_has_extension() { "$1" -m 2>/dev/null | grep -qx opentelemetry; }
 fpm_scan_dir() { "$1" -i 2>/dev/null | sed -n 's/^Scan this dir for additional .ini files => //p'; }
-fpm_prepend_file() { "$1" -i 2>/dev/null | sed -n 's/^auto_prepend_file => \([^=]*\) => .*/\1/p' | sed 's/ *$//'; }
+fpm_ini() { "$1" -i 2>/dev/null | sed -n "s/^$2 => \([^=]*\) => .*/\1/p" | sed 's/ *$//'; }
+
+# The OpenTelemetry extension turns PHP's JIT off. Development machines rarely use JIT;
+# a server that enabled it on purpose should not lose it to a profiler.
+fpm_jit_enabled() {
+    local fpm="$1" scan_dir="$2" jit buffer
+    jit="$(fpm_ini "$fpm" opcache.jit | tr '[:upper:]' '[:lower:]')"
+    buffer="$(fpm_ini "$fpm" opcache.jit_buffer_size)"
+    [ "$(fpm_ini "$fpm" opcache.enable)" = "On" ] || return 1
+    case "$jit" in ""|disable|off|0|"no value") ;; *) [ "$buffer" != "0" ] && return 0 ;; esac
+
+    # A pool can enable JIT on its own (php_admin_value[opcache.jit]); check pool files next to conf.d.
+    local pools="${scan_dir%/conf.d}/pool.d"
+    [ -d "$pools" ] && grep -hE '^[[:space:]]*php(_admin)?_value\[opcache\.jit\][[:space:]]*=' "$pools"/*.conf 2>/dev/null \
+        | grep -qviE '=[[:space:]]*(disable|off|0)[[:space:]]*$'
+}
 
 wanted() {
     [ -z "${versions[*]+x}" ] && return 0
@@ -127,8 +142,27 @@ install_files() {
     run ln -sfn "$PREFIX/$version" "$PREFIX/current"
 }
 
+# Stops before changing anything when a selected PHP-FPM version runs with JIT.
+check_jit() {
+    local fpm version blocked=0
+    for fpm in ${FPM_BINARIES[@]+"${FPM_BINARIES[@]}"}; do
+        version="$(fpm_version "$fpm")"
+        [ -n "$version" ] && wanted "$version" || continue
+        if fpm_jit_enabled "$fpm" "$(fpm_scan_dir "$fpm")"; then
+            echo "error: PHP $version has JIT enabled. The OpenTelemetry extension would turn it off." >&2
+            blocked=1
+        fi
+    done
+    if [ "$blocked" -eq 1 ]; then
+        echo "Disable JIT first (opcache.jit=disable), or leave this PHP version out with --php." >&2
+        echo "The bridge is meant for development machines, not production servers." >&2
+        exit 1
+    fi
+}
+
 do_install() {
     local fpm version scan_dir current found=0
+    check_jit
     install_files
 
     for fpm in ${FPM_BINARIES[@]+"${FPM_BINARIES[@]}"}; do
@@ -150,7 +184,7 @@ do_install() {
         fi
 
         # PHP takes one auto_prepend_file: leave another one alone.
-        current="$(fpm_prepend_file "$fpm")"
+        current="$(fpm_ini "$fpm" auto_prepend_file)"
         if [ -n "$current" ] && [ "$current" != "no value" ] && [ "$current" != "$PREFIX/current/bridge/prepend.php" ]; then
             warn "PHP $version: auto_prepend_file is already $current; skipped"
             continue

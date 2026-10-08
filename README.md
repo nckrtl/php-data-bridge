@@ -19,6 +19,9 @@ The bridge does nothing:
 - for requests no supported framework handles,
 - when the app has `nckrtl/laravel-toolbar`, or runs with `APP_ENV=production`.
 
+The bridge is for development machines, not production servers. The OpenTelemetry extension
+turns PHP's JIT off once loaded, even where the bridge does nothing.
+
 Errors in the bridge go to the PHP error log, prefixed `[php-data-bridge]`. They never reach the app.
 
 ## What it collects
@@ -79,7 +82,9 @@ A `tools` section is for the toolbar that shows the data. The bridge ignores it.
 Per version it checks that PHP-FPM loads the OpenTelemetry extension (and installs
 `phpX.Y-opentelemetry` with apt when missing, for PHP-FPM only), then writes
 `99-php-data-bridge.ini` to PHP-FPM's own ini folder and reloads it. The CLI is not touched.
-It skips a version that already has another `auto_prepend_file`.
+It skips a version that already has another `auto_prepend_file`. It stops before changing
+anything when a selected PHP-FPM version has JIT enabled, in its ini files or a pool: disable
+JIT first, or leave that version out with `--php`.
 
 The bridge goes to `/usr/local/share/php-data-bridge/<version>`, with `current` pointing at
 it. The ini line is written only after the files are in place and removed before them:
