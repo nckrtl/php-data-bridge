@@ -20,6 +20,7 @@ define('PHP_DATA_BRIDGE_VERSION', trim((string) @file_get_contents(__DIR__.'/VER
 
 require_once __DIR__.'/src/Adapter.php';
 require_once __DIR__.'/src/Adapters/Laravel.php';
+require_once __DIR__.'/src/Adapters/Symfony.php';
 require_once __DIR__.'/src/Bridge.php';
 require_once __DIR__.'/src/Config.php';
 require_once __DIR__.'/src/Payload.php';

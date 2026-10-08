@@ -44,6 +44,17 @@ Laravel adapter:
 - Inertia component and props: shared, deferred, merge, scroll and once.
 - Livewire updates in the request history.
 
+Symfony adapter:
+
+- Request stages: bootstrapping, booting the kernel, request listeners (routing, security),
+  controller, Twig rendering, response listeners, preparing the response.
+- Route name, path and controller.
+- Doctrine DBAL queries with bindings, duration, duplicates and the app file and line.
+- Doctrine entities: loaded, scheduled for insert, scheduled for delete.
+- The first Twig template and its context (objects as class names).
+- Framework details under `framework`. The toolbars show a `laravel` section only, so they
+  need a small change to show it.
+
 Not yet: redirect chains, Blade view names, editor links, prop source locations, other frameworks.
 
 ## Layout

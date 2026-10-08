@@ -139,6 +139,8 @@ install_files() {
     version="$(tr -d '[:space:]' < "$work/bridge/VERSION")"
     say "bridge $version -> $PREFIX/$version"
     run mkdir -p "$PREFIX/$version"
+    # Replace, never merge into, an earlier copy of the same version.
+    run rm -rf "$PREFIX/$version/bridge"
     run cp -R "$work/bridge" "$PREFIX/$version/"
     run ln -sfn "$PREFIX/$version" "$PREFIX/current"
 }

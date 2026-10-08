@@ -11,7 +11,7 @@ namespace PhpDataBridge;
 final class Bridge
 {
     /** @var list<class-string<Adapter>> */
-    public const ADAPTERS = [Adapters\Laravel::class];
+    public const ADAPTERS = [Adapters\Laravel::class, Adapters\Symfony::class];
 
     public static function register(): void
     {
@@ -52,12 +52,25 @@ final class Bridge
         );
     }
 
+    /** True while a hook callback runs: calls it makes itself are not recorded. */
+    private static bool $inCallback = false;
+
     public static function guard(\Closure $callback): void
     {
+        // A callback that calls a hooked method (a query to name the database, say) must not
+        // set off its own hooks again, or it records itself and can loop forever.
+        if (self::$inCallback) {
+            return;
+        }
+
+        self::$inCallback = true;
+
         try {
             $callback();
         } catch (\Throwable $exception) {
             error_log('[php-data-bridge] '.$exception->getMessage().' at '.$exception->getFile().':'.$exception->getLine());
+        } finally {
+            self::$inCallback = false;
         }
     }
 }
