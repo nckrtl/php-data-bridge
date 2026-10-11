@@ -6,6 +6,7 @@ namespace PhpDataBridge\Adapters;
 
 use PhpDataBridge\Adapter;
 use PhpDataBridge\Bridge;
+use PhpDataBridge\Config;
 use PhpDataBridge\Recorder;
 
 /** Symfony: kernel stages, route, Doctrine queries and entities, Twig rendering. */
@@ -25,7 +26,7 @@ final class Symfony implements Adapter
     {
         $kernel = Recorder::$framework['kernel'] ?? null;
 
-        return $kernel === null || $kernel->getEnvironment() !== 'prod';
+        return $kernel !== null && Config::allowsEnvironment($kernel->getEnvironment());
     }
 
     public static function stages(): array
@@ -51,7 +52,7 @@ final class Symfony implements Adapter
 
         $data['request'] += [
             'route_name' => is_string($routeName) ? $routeName : null,
-            'route_uri' => is_string($routeName) ? self::routePath($kernel, $routeName) : null,
+            'route_uri' => $request->attributes->get('_route_path'),
             'controller_action' => is_string($controller) ? $controller : null,
             'middleware' => [],
             'is_inertia' => false,
@@ -75,11 +76,16 @@ final class Symfony implements Adapter
         Bridge::hook(
             'Symfony\Component\HttpKernel\Kernel',
             'boot',
-            pre: static fn () => Recorder::mark('boot'),
+            pre: static function (object $kernel): void {
+                Recorder::$framework['kernel'] ??= $kernel;
+                Recorder::$enabled = self::shouldCollect();
+                if (Recorder::$enabled) { Recorder::mark('boot'); }
+            },
             post: static function (object $kernel): void {
                 Recorder::$framework['kernel'] ??= $kernel;
-                Recorder::mark('booted');
+                if (Recorder::$enabled) { Recorder::mark('booted'); }
             },
+            bootstrap: true,
         );
 
         Bridge::hook(
@@ -130,10 +136,15 @@ final class Symfony implements Adapter
                 'Doctrine\DBAL\Connection',
                 $method,
                 pre: static function () use (&$started): void {
-                    $started[] = [hrtime(true), Recorder::appFrame()];
+                    $started[] = count(Recorder::$queries) < Recorder::MAX_QUERIES ? [hrtime(true), Recorder::appFrame()] : null;
                 },
                 post: static function (object $connection, array $params) use (&$started): void {
-                    [$start, $frame] = array_pop($started) ?? [hrtime(true), null];
+                    $timing = array_pop($started);
+                    if ($timing === null || count(Recorder::$queries) >= Recorder::MAX_QUERIES) {
+                        Recorder::$droppedQueries++;
+                        return;
+                    }
+                    [$start, $frame] = $timing;
                     // From the parameters: getDatabase() runs a query itself, which would hook again.
                     $connectionParams = $connection->getParams();
                     $driver = $connectionParams['driver'] ?? null;
@@ -141,7 +152,7 @@ final class Symfony implements Adapter
 
                     Recorder::$queries[] = [
                         'sql' => (string) ($params[0] ?? ''),
-                        'bindings' => array_values(array_map(self::plain(...), (array) ($params[1] ?? []))),
+                        'bindings' => Recorder::plain((array) ($params[1] ?? [])),
                         'duration' => (hrtime(true) - $start) / 1e6,
                         'connection' => is_string($database) ? $database : 'default',
                         'driver' => is_string($driver) ? $driver : 'dbal',
@@ -187,7 +198,7 @@ final class Symfony implements Adapter
 
                 Recorder::mark('render');
                 Recorder::$framework['template'] = is_string($params[0] ?? null) ? $params[0] : get_debug_type($params[0] ?? null);
-                Recorder::$framework['template_context'] = array_map(self::plain(...), (array) ($params[1] ?? []));
+                Recorder::$framework['template_context'] = Config::$redactViewData ? '[redacted]' : Recorder::plain((array) ($params[1] ?? []));
             },
             post: static function () use (&$depth): void {
                 if (--$depth === 0 && isset(Recorder::$points['render'])) {
@@ -195,29 +206,5 @@ final class Symfony implements Adapter
                 }
             },
         );
-    }
-
-    private static function routePath(?object $kernel, string $name): ?string
-    {
-        $container = $kernel?->getContainer();
-
-        if ($container === null || ! $container->has('router')) {
-            return null;
-        }
-
-        return $container->get('router')->getRouteCollection()->get($name)?->getPath();
-    }
-
-    /** Template context and bindings as plain data: objects become their class name. */
-    private static function plain(mixed $value, int $depth = 0): mixed
-    {
-        return match (true) {
-            is_scalar($value), $value === null => $value,
-            is_array($value) => $depth >= 3 ? '[array]' : array_map(static fn ($item) => self::plain($item, $depth + 1), $value),
-            $value instanceof \DateTimeInterface => $value->format(DATE_ATOM),
-            $value instanceof \BackedEnum => $value->value,
-            $value instanceof \Stringable && ! method_exists($value, 'getId') => (string) $value,
-            default => get_debug_type($value),
-        };
     }
 }

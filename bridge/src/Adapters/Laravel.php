@@ -6,6 +6,7 @@ namespace PhpDataBridge\Adapters;
 
 use PhpDataBridge\Adapter;
 use PhpDataBridge\Bridge;
+use PhpDataBridge\Config;
 use PhpDataBridge\Recorder;
 
 /** Laravel: lifecycle stages, route, queries, Eloquent models, Inertia and Livewire. */
@@ -26,7 +27,7 @@ final class Laravel implements Adapter
             return false;
         }
 
-        return ! \Illuminate\Container\Container::getInstance()->environment('production');
+        return Config::allowsEnvironment(\Illuminate\Container\Container::getInstance()->environment());
     }
 
     public static function stages(): array
@@ -55,11 +56,11 @@ final class Laravel implements Adapter
             'controller_action' => $route?->getActionName(),
             'middleware' => array_map(
                 static fn ($middleware) => ['class' => is_string($middleware) ? $middleware : get_debug_type($middleware)],
-                $route?->gatherMiddleware() ?? [],
+                self::optional(static fn () => $route?->gatherMiddleware()) ?? [],
             ),
             'is_inertia' => $page !== null,
             'view_name' => $page['component'] ?? null,
-            'view_data' => $page['props'] ?? null,
+            'view_data' => Config::$redactViewData ? '[redacted]' : Recorder::plain($page['props'] ?? null),
         ];
 
         $data['laravel'] = [
@@ -71,13 +72,19 @@ final class Laravel implements Adapter
             'host' => $request->getHost(),
         ];
 
-        $data['inertia'] = $page === null ? null : self::inertiaDetails($app, $page);
+        $data['inertia'] = $page === null ? null : self::optional(static fn () => self::inertiaDetails($app, $page));
 
         return $data;
     }
 
     private static function lifecycle(): void
     {
+        // Laravel loads APP_ENV during bootstrap, after Kernel::handle starts.
+        Bridge::hook('Illuminate\Foundation\Bootstrap\LoadConfiguration', 'bootstrap',
+            post: static function (): void { Recorder::$enabled = self::shouldCollect(); },
+            bootstrap: true,
+        );
+
         Bridge::hook(
             'Illuminate\Foundation\Bootstrap\RegisterProviders',
             'bootstrap',
@@ -91,7 +98,8 @@ final class Laravel implements Adapter
                 Recorder::$request ??= $params[0] ?? null;
                 Recorder::$adapter ??= self::class;
             },
-            post: static fn () => Recorder::mark('handled'),
+            post: static function (): void { if (Recorder::$enabled) { Recorder::mark('handled'); } },
+            bootstrap: true,
         );
 
         Bridge::hook(
@@ -135,14 +143,19 @@ final class Laravel implements Adapter
             'Illuminate\Database\Connection',
             'run',
             pre: static function () use (&$started): void {
-                $started[] = [hrtime(true), Recorder::appFrame()];
+                $started[] = count(Recorder::$queries) < Recorder::MAX_QUERIES ? [hrtime(true), Recorder::appFrame()] : null;
             },
             post: static function (object $connection, array $params) use (&$started): void {
-                [$start, $frame] = array_pop($started) ?? [hrtime(true), null];
+                $timing = array_pop($started);
+                if ($timing === null || count(Recorder::$queries) >= Recorder::MAX_QUERIES) {
+                    Recorder::$droppedQueries++;
+                    return;
+                }
+                [$start, $frame] = $timing;
 
                 Recorder::$queries[] = [
                     'sql' => (string) ($params[0] ?? ''),
-                    'bindings' => array_values((array) ($params[1] ?? [])),
+                    'bindings' => Recorder::plain((array) ($params[1] ?? [])),
                     'duration' => (hrtime(true) - $start) / 1e6,
                     'connection' => $connection->getName(),
                     'driver' => $connection->getDriverName(),
@@ -197,6 +210,11 @@ final class Laravel implements Adapter
                 Recorder::$framework['inertia_page'] = isset($page) && is_array($page) ? $page : null;
             },
         );
+    }
+
+    private static function optional(\Closure $read): mixed
+    {
+        try { return $read(); } catch (\Throwable) { return null; }
     }
 
     /** @return array<string, mixed> */

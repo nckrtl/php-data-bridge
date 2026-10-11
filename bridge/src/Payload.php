@@ -17,23 +17,39 @@ final class Payload
 
     public static function attach(object $request, object $response): void
     {
+        if ($response instanceof \Symfony\Component\HttpFoundation\StreamedResponse
+            || $response instanceof \Symfony\Component\HttpFoundation\BinaryFileResponse
+            || str_contains(strtolower((string) $response->headers->get('Content-Disposition')), 'attachment')
+            || $response->headers->has('Content-Encoding')
+            || $request->isMethod('HEAD') || $response->getStatusCode() < 200
+            || in_array($response->getStatusCode(), [204, 304], true)) {
+            return;
+        }
         $id = bin2hex(random_bytes(8));
         $data = self::redact(self::build($id, $request, $response));
         $data['history_row'] = self::historyRow($id, $request, $data);
 
-        Store::save($id, $data);
+        $data['history_available'] = Store::save($id, $data);
+        $response->headers->set('Cache-Control', 'private, no-store');
+        foreach (['ETag', 'Last-Modified', 'Expires'] as $header) {
+            $response->headers->remove($header);
+        }
 
         if (self::wantsHeader($request, $response)) {
             self::attachHeader($response, $data, $request);
         } else {
-            self::injectHtml($response, $data);
+            if (! self::injectHtml($response, $data)) {
+                self::attachHeader($response, $data, $request);
+            }
         }
     }
 
     /** @return array<string, mixed> */
     private static function build(string $id, object $request, object $response): array
     {
-        $content = (string) $response->getContent();
+        $length = $response->headers->get('Content-Length');
+        $content = $length === null ? $response->getContent() : null;
+        $size = $length !== null ? (int) $length : (is_string($content) ? strlen($content) : null);
         $wallMs = (Recorder::$points['send']['time'] - Recorder::$points['start']['time']) * 1000;
 
         $data = [
@@ -54,7 +70,7 @@ final class Payload
             'response' => [
                 'status_code' => $response->getStatusCode(),
                 'headers' => $response->headers->all(),
-                'size' => self::bytes(strlen($content)),
+                'size' => $size === null ? null : self::bytes($size),
                 'content_type' => $response->headers->get('Content-Type'),
                 'redirect_to' => $response->isRedirect() ? $response->headers->get('Location') : null,
                 'cookies' => array_map(static fn ($cookie) => [
@@ -116,6 +132,8 @@ final class Payload
                 'color' => $color,
                 'wall_time' => ['percentage' => $seconds / $total * 100, 'measurement' => self::ms($seconds * 1000)],
                 // Allocated memory (memory_get_usage()); real usage moves in 2 MB chunks.
+                'memory_delta' => ['measurement' => self::bytes($next['memory'] - $point['memory'])],
+                // Compatibility alias; this also measures emalloc usage, not RSS.
                 'memory_real_delta' => ['measurement' => self::bytes($next['memory'] - $point['memory'])],
             ];
         }
@@ -138,7 +156,7 @@ final class Payload
 
             $queries[] = [
                 'sql' => $query['sql'],
-                'bindings' => $query['bindings'],
+                'bindings' => Config::$redactBindings ? array_fill_keys(array_keys($query['bindings']), self::REDACTED) : $query['bindings'],
                 'duration' => round($query['duration'], 3),
                 'is_duplicate' => isset($seen[$key]),
                 'is_slow' => $query['duration'] >= Config::$slowQueryMs,
@@ -153,7 +171,7 @@ final class Payload
             $databases[$query['connection']] = ['name' => $query['connection'], 'driver' => $query['driver']];
         }
 
-        return ['totalTime' => round($total, 3), 'databases' => array_values($databases), 'queries' => $queries];
+        return ['totalTime' => round($total, 3), 'databases' => array_values($databases), 'queries' => $queries, 'truncated_count' => Recorder::$droppedQueries];
     }
 
     /** @return array<string, mixed> */
@@ -205,6 +223,19 @@ final class Payload
      */
     private static function redact(array $data): array
     {
+        if (Config::$redactQueryString) {
+            $data['request']['uri'] = self::withoutQuery($data['request']['uri']);
+            if (is_string($data['response']['redirect_to'])) {
+                $data['response']['redirect_to'] = self::withoutQuery($data['response']['redirect_to']);
+            }
+            foreach (['request', 'response'] as $part) {
+                foreach (['referer', 'location', 'content-location'] as $name) {
+                    if (isset($data[$part]['headers'][$name])) {
+                        $data[$part]['headers'][$name] = array_map(self::withoutQuery(...), $data[$part]['headers'][$name]);
+                    }
+                }
+            }
+        }
         foreach (['request', 'response'] as $part) {
             foreach (Config::$redactHeaders as $name) {
                 if (isset($data[$part]['headers'][$name])) {
@@ -226,6 +257,11 @@ final class Payload
         }
 
         return $data;
+    }
+
+    private static function withoutQuery(string $uri): string
+    {
+        return preg_split('/[?#]/', $uri, 2)[0];
     }
 
     /** @param list<string> $keys */
@@ -261,7 +297,7 @@ final class Payload
             'name' => $data['request']['route_name'] ?? null,
             'action' => $data['request']['controller_action'] ?? null,
             'status_code' => $data['response']['status_code'],
-            'size' => $data['response']['size']['formattedValue'],
+            'size' => $data['response']['size']['formattedValue'] ?? 'unknown',
             'duration' => $data['profiler']['total_wall_time']['formattedValue'],
             'response_type' => $type,
             'follow_up' => $request->headers->has('X-Inertia-Partial-Data') ? 'partial' : null,
@@ -303,43 +339,52 @@ final class Payload
             $data['request_history'] = [$data['history_row']];
         }
 
-        $encoded = base64_encode((string) json_encode($data, JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR));
+        $json = (string) json_encode($data, JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR);
 
-        if (strlen($encoded) > self::MAX_HEADER_BYTES) {
+        if (4 * (int) ceil(strlen($json) / 3) > self::MAX_HEADER_BYTES) {
             $response->headers->set('x-toolbar-summary', base64_encode((string) json_encode([
                 'request_id' => $data['request_id'],
                 'history_row' => $data['history_row'],
+                'history_available' => $data['history_available'],
             ])));
 
             return;
         }
 
-        $response->headers->set('x-toolbar', $encoded);
+        $response->headers->set('x-toolbar', base64_encode($json));
     }
 
-    private static function injectHtml(object $response, array $data): void
+    private static function injectHtml(object $response, array $data): bool
     {
         $content = $response->getContent();
 
-        if (! self::isHtml($response) || ! is_string($content)) {
-            return;
+        // Respect header and meta policies without guessing the app's nonce contract.
+        // Native clients can still read the header; no policy is weakened.
+        if (! self::isHtml($response) || ! is_string($content)
+            || strlen($content) > Store::MAX_BYTES
+            || $response->headers->has('Content-Security-Policy')
+            || $response->headers->has('Content-Security-Policy-Report-Only')
+            || stripos($content, 'content-security-policy') !== false) {
+            return false;
         }
 
         $position = strripos($content, '</body>');
 
         if ($position === false) {
-            return;
+            return false;
         }
 
         $data['selected_request_id'] = $data['request_id'];
         $data['request_history'] = [$data['history_row']];
 
         $json = json_encode($data, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR);
+        if ($json === false || strlen($json) > Store::MAX_BYTES) { return false; }
         $script = '<script>window.__LARAVEL_TOOLBAR_DATA__='.$json.';'.file_get_contents(__DIR__.'/../client.js').'</script>';
 
         $content = substr($content, 0, $position).$script.substr($content, $position);
         $response->setContent($content);
         $response->headers->set('Content-Length', (string) strlen($content));
+        return true;
     }
 
     /** @return array{value: float, unit: string, formattedValue: string} */

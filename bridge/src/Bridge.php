@@ -21,6 +21,17 @@ final class Bridge
 
         // Laravel and Symfony both send through HttpFoundation: the last moment to add data.
         self::hook('Symfony\Component\HttpFoundation\Response', 'send', pre: static function (object $response): void {
+            // Laravel's bootstrap eligibility check already resolves this provider.
+            // Its own toolbar owns the history URL as well as payload collection.
+            if (Recorder::$adapter === Adapters\Laravel::class
+                && class_exists('NckRtl\\Toolbar\\ToolbarServiceProvider', false)) {
+                return;
+            }
+            $allowed = Recorder::$enabled && Recorder::$adapter !== null && (Recorder::$adapter)::shouldCollect();
+            if (Store::serveDetails($response, $allowed)) {
+                Recorder::$sent = true;
+                return;
+            }
             if (Recorder::$sent || Recorder::$request === null || Recorder::$adapter === null) {
                 return;
             }
@@ -28,25 +39,27 @@ final class Bridge
             Recorder::$sent = true;
             Recorder::mark('send');
 
-            if ((Recorder::$adapter)::shouldCollect()) {
+            if ($allowed) {
                 Payload::attach(Recorder::$request, $response);
             }
-        });
+        }, bootstrap: true);
     }
 
     /**
      * Registers a hook. The extension calls `$pre` with ($object, $params, ...) before the
      * method runs and `$post` with ($object, $params, $returnValue, $exception, ...) after.
      */
-    public static function hook(string $class, string $function, ?\Closure $pre = null, ?\Closure $post = null): void
+    public static function hook(string $class, string $function, ?\Closure $pre = null, ?\Closure $post = null, bool $bootstrap = false): void
     {
         \OpenTelemetry\Instrumentation\hook(
             $class,
             $function,
-            pre: $pre === null ? null : static function (mixed ...$args) use ($pre): void {
+            pre: $pre === null ? null : static function (mixed ...$args) use ($pre, $bootstrap): void {
+                if (! $bootstrap && ! Recorder::$enabled) { return; }
                 self::guard(static fn () => $pre(...$args));
             },
-            post: $post === null ? null : static function (mixed ...$args) use ($post): void {
+            post: $post === null ? null : static function (mixed ...$args) use ($post, $bootstrap): void {
+                if (! $bootstrap && ! Recorder::$enabled) { return; }
                 self::guard(static fn () => $post(...$args));
             },
         );

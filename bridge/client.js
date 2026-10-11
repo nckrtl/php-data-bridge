@@ -11,20 +11,26 @@
   function read(get) {
     try {
       var full = get("x-toolbar");
-      if (full) return emit(JSON.parse(atob(full)));
+      if (full && full.length <= 32768) return emit(JSON.parse(atob(full)));
       var summary = get("x-toolbar-summary");
-      if (summary) {
+      if (summary && summary.length <= 32768) {
         var parsed = JSON.parse(atob(summary));
-        emit({ request_id: parsed.request_id, history_row: parsed.history_row });
+        emit({ request_id: parsed.request_id, history_row: parsed.history_row, history_available: parsed.history_available });
       }
     } catch (error) {}
   }
 
+  function accepts(url) {
+    try {
+      var parsed = new URL(url);
+      return parsed.origin === window.location.origin && !/^\/_toolbar\/requests\//.test(parsed.pathname);
+    } catch (error) { return false; }
+  }
+
   var originalFetch = window.fetch;
   window.fetch = function (input) {
-    var url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     return originalFetch.apply(this, arguments).then(function (response) {
-      if (url.indexOf("/_toolbar/requests/") === -1) {
+      if (accepts(response.url)) {
         read(function (name) { return response.headers.get(name); });
       }
       return response;
@@ -35,7 +41,9 @@
   XMLHttpRequest.prototype.send = function () {
     var xhr = this;
     xhr.addEventListener("load", function () {
-      read(function (name) { return xhr.getResponseHeader(name); });
+      if (accepts(xhr.responseURL)) {
+        read(function (name) { return xhr.getResponseHeader(name); });
+      }
     });
     return originalSend.apply(this, arguments);
   };

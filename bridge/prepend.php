@@ -34,9 +34,8 @@ if (PhpDataBridge\Config::ignores((string) parse_url((string) ($_SERVER['REQUEST
     return;
 }
 
-// The history endpoint the toolbar fetches: answered here, before the app boots.
-if (PhpDataBridge\Store::serveDetails()) {
-    exit;
+if (! PhpDataBridge\Config::allowsRequest()) {
+    return;
 }
 
 PhpDataBridge\Bridge::register();

@@ -87,7 +87,7 @@ wanted() {
 }
 
 reload_fpm() {
-    local fpm="$1" version="$2"
+    local fpm="$1" version="$2" formula prefix
     if ! run "$fpm" -t >/dev/null 2>&1; then
         warn "PHP $version: PHP-FPM config test failed; not reloading"
         return 1
@@ -95,8 +95,18 @@ reload_fpm() {
     if command -v systemctl >/dev/null && systemctl list-unit-files "php$version-fpm.service" >/dev/null 2>&1 \
         && systemctl is-active --quiet "php$version-fpm"; then
         run systemctl reload "php$version-fpm"
-    elif command -v brew >/dev/null && brew services list 2>/dev/null | grep -qE "^php(@$version)? .*started"; then
-        run brew services restart "php@$version"
+    elif command -v brew >/dev/null; then
+        for formula in php "php@$version"; do
+            prefix="$(brew --prefix "$formula" 2>/dev/null)" || continue
+            if [ "$prefix/sbin/php-fpm" -ef "$fpm" ] && brew services list 2>/dev/null \
+                | awk -v name="$formula" '$1 == name && $2 == "started" { found=1 } END { exit !found }'; then
+                # Homebrew services belong to the invoking user, not automatically root.
+                if [ "$dry_run" -eq 1 ]; then say "  would run: brew services restart $formula"
+                else brew services restart "$formula"; fi
+                return
+            fi
+        done
+        say "  reload PHP-FPM $version yourself to apply the change"
     else
         say "  reload PHP-FPM $version yourself to apply the change"
     fi
@@ -117,9 +127,40 @@ install_extension() {
     return 1
 }
 
-# Puts the bridge in $PREFIX/<version> and points $PREFIX/current at it.
+verify_checksum() {
+    local directory="$1" expected actual
+    expected="$(awk 'NR == 1 { print $1 }' "$directory/bridge.tar.gz.sha256")"
+    [[ "$expected" =~ ^[a-fA-F0-9]{64}$ ]] || { warn "invalid SHA-256 checksum"; return 1; }
+    if command -v sha256sum >/dev/null; then
+        actual="$(sha256sum "$directory/bridge.tar.gz")"
+    elif command -v shasum >/dev/null; then
+        actual="$(shasum -a 256 "$directory/bridge.tar.gz")"
+    else
+        warn "SHA-256 verification requires sha256sum or shasum"; return 1
+    fi
+    [ "$(printf '%s' "${actual%% *}" | tr 'A-F' 'a-f')" = "$(printf '%s' "$expected" | tr 'A-F' 'a-f')" ] \
+        || { warn "SHA-256 mismatch"; return 1; }
+}
+
+validate_archive() {
+    local archive="$1" member
+    tar -tzf "$archive" > "$WORK/members"
+    while IFS= read -r member; do
+        member="${member#./}"
+        [[ "$member" =~ ^bridge(/[a-zA-Z0-9_.-]+)*/?$ ]] \
+            && [[ "/$member/" != *"/../"* && "/$member/" != *"/./"* ]] \
+            || { warn "unsafe archive path: $member"; return 1; }
+    done < "$WORK/members"
+    # Refuse links and special files before extraction, including link targets outside WORK.
+    tar -tvzf "$archive" > "$WORK/member-types"
+    if LC_ALL=C grep -qvE '^[-d]' "$WORK/member-types"; then
+        warn "archive contains links or special files"; return 1
+    fi
+}
+
+# Publish a complete immutable tree, then atomically rename the current symlink.
 install_files() {
-    local work version
+    local work version destination link
     work="$WORK"
 
     if [ -n "$source_dir" ]; then
@@ -130,19 +171,32 @@ install_files() {
         local url="$base/latest/download/php-data-bridge.tar.gz"
         [ "$release" != "latest" ] && url="$base/download/v$release/php-data-bridge.tar.gz"
         say "downloading $url"
-        curl -fsSL "$url" -o "$work/bridge.tar.gz"
-        curl -fsSL "$url.sha256" -o "$work/bridge.tar.gz.sha256"
-        (cd "$work" && echo "$(cut -d' ' -f1 bridge.tar.gz.sha256)  bridge.tar.gz" | sha256sum -c --quiet -)
+        curl --proto =https --proto-redir =https -fsSL "$url" -o "$work/bridge.tar.gz"
+        curl --proto =https --proto-redir =https -fsSL "$url.sha256" -o "$work/bridge.tar.gz.sha256"
+        verify_checksum "$work"
+        validate_archive "$work/bridge.tar.gz"
         tar -xzf "$work/bridge.tar.gz" -C "$work"
     fi
 
-    version="$(tr -d '[:space:]' < "$work/bridge/VERSION")"
-    say "bridge $version -> $PREFIX/$version"
-    run mkdir -p "$PREFIX/$version"
-    # Replace, never merge into, an earlier copy of the same version.
-    run rm -rf "$PREFIX/$version/bridge"
-    run cp -R "$work/bridge" "$PREFIX/$version/"
-    run ln -sfn "$PREFIX/$version" "$PREFIX/current"
+    version="$(cat "$work/bridge/VERSION")"
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]] \
+        || { warn "invalid bridge version"; return 1; }
+    [ -f "$work/bridge/prepend.php" ] || { warn "archive has no bridge entry point"; return 1; }
+    if [ -n "$(find "$work/bridge" ! -type f ! -type d -print)" ]; then
+        warn "bridge contains links or special files"; return 1
+    fi
+    run mkdir -p "$PREFIX"
+    if [ "$dry_run" -eq 1 ]; then destination="$PREFIX/$version.install-DRYRUN"
+    else destination="$(run mktemp -d "$PREFIX/$version.install-XXXXXXXX")"; fi
+    say "bridge $version -> $destination"
+    run chmod 0755 "$destination"
+    run cp -R "$work/bridge" "$destination/"
+    link="$PREFIX/.current-${destination##*/}"
+    run ln -s "$destination" "$link"
+    # BSD and GNU mv have different flags for replacing a symlink to a directory.
+    if [ "$(uname -s)" = Darwin ]; then run mv -fh "$link" "$PREFIX/current"
+    else run mv -fT "$link" "$PREFIX/current"; fi
+    # Keep previous trees: in-flight workers can still be loading files from them.
 }
 
 # Stops before changing anything when a selected PHP-FPM version runs with JIT.
@@ -150,7 +204,7 @@ check_jit() {
     local fpm version blocked=0
     for fpm in ${FPM_BINARIES[@]+"${FPM_BINARIES[@]}"}; do
         version="$(fpm_version "$fpm")"
-        [ -n "$version" ] && wanted "$version" || continue
+        if [ -z "$version" ] || ! wanted "$version"; then continue; fi
         if fpm_jit_enabled "$fpm" "$(fpm_scan_dir "$fpm")"; then
             echo "error: PHP $version has JIT enabled. The OpenTelemetry extension would turn it off." >&2
             blocked=1
@@ -170,7 +224,7 @@ do_install() {
 
     for fpm in ${FPM_BINARIES[@]+"${FPM_BINARIES[@]}"}; do
         version="$(fpm_version "$fpm")"
-        [ -n "$version" ] && wanted "$version" || continue
+        if [ -z "$version" ] || ! wanted "$version"; then continue; fi
         found=1
         say "PHP $version ($fpm)"
 
@@ -208,7 +262,7 @@ do_uninstall() {
     local fpm version scan_dir
     for fpm in ${FPM_BINARIES[@]+"${FPM_BINARIES[@]}"}; do
         version="$(fpm_version "$fpm")"
-        [ -n "$version" ] && wanted "$version" || continue
+        if [ -z "$version" ] || ! wanted "$version"; then continue; fi
         scan_dir="$(fpm_scan_dir "$fpm")"
         if [ -n "$scan_dir" ] && [ -f "$scan_dir/$INI_NAME" ]; then
             say "PHP $version: removing $scan_dir/$INI_NAME"
@@ -226,6 +280,9 @@ do_uninstall() {
     fi
     say "The OpenTelemetry extension stays installed; remove it with your package manager if nothing else uses it."
 }
+
+# Tests source the functions without touching system PHP.
+if [ "${PHP_DATA_BRIDGE_INSTALL_TEST:-0}" = 1 ]; then return 0; fi
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT

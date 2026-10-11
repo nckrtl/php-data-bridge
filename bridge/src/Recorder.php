@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace PhpDataBridge;
 
-/** What the hooks saw during one request. Plain static state: one request per FPM worker. */
+/** What the hooks saw during one request. PHP resets this userland state at request shutdown. */
 final class Recorder
 {
     /** @var array<string, array{time: float, memory: int}> Lifecycle points, first hit wins. */
@@ -26,12 +26,20 @@ final class Recorder
     public static array $framework = [];
 
     public static bool $sent = false;
+    public static bool $enabled = false;
+    public const MAX_QUERIES = 500;
+    public static int $droppedQueries = 0;
 
     /** The app's root: the closest folder above the front controller with a composer.json. */
     public static string $basePath = '';
 
     public static function start(): void
     {
+        self::$points = self::$queries = self::$models = self::$framework = [];
+        self::$request = null;
+        self::$adapter = null;
+        self::$sent = self::$enabled = false;
+        self::$droppedQueries = 0;
         $script = (string) ($_SERVER['SCRIPT_FILENAME'] ?? getcwd().'/index.php');
         self::$basePath = self::findBasePath(dirname($script)) ?? dirname($script, 2);
         self::$points['start'] = [
@@ -66,6 +74,20 @@ final class Recorder
         }
 
         return null;
+    }
+
+    /** Bounded, inert values: never invoke user __toString() or JsonSerializable code. */
+    public static function plain(mixed $value, int $depth = 0): mixed
+    {
+        return match (true) {
+            is_string($value) => strlen($value) > 4096 ? substr($value, 0, 4096).'[truncated]' : $value,
+            is_scalar($value), $value === null => $value,
+            is_array($value) => $depth >= 3 ? '[array]' : array_map(
+                static fn ($item) => self::plain($item, $depth + 1), array_slice($value, 0, 100, true)),
+            $value instanceof \DateTimeInterface => $value->format(DATE_ATOM),
+            $value instanceof \BackedEnum => $value->value,
+            default => get_debug_type($value),
+        };
     }
 
     private static function findBasePath(string $directory): ?string
