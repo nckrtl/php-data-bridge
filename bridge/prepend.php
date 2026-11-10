@@ -8,7 +8,12 @@
 
 declare(strict_types=1);
 
-if (PHP_SAPI !== 'fpm-fcgi' && PHP_SAPI !== 'cli-server') {
+if (PHP_SAPI !== 'fpm-fcgi' && PHP_SAPI !== 'cli-server' && PHP_SAPI !== 'frankenphp') {
+    return;
+}
+
+// A FrankenPHP worker keeps classes and statics between requests; the Recorder needs a fresh PHP for each one.
+if (isset($_SERVER['FRANKENPHP_WORKER'])) {
     return;
 }
 
