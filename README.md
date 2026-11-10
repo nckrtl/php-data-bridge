@@ -72,9 +72,12 @@ folder, not CLI PHP's, and do not replace an existing `auto_prepend_file` used b
 
 ### Which apps will it profile?
 
-The bridge supports **Laravel and Symfony**. It runs with PHP-FPM and PHP's built-in web
-server. The installer configures PHP-FPM; it does not change CLI PHP or configure the
-built-in server for you.
+The bridge supports **Laravel and Symfony**. It runs with PHP-FPM, PHP's built-in web
+server, and FrankenPHP in classic mode. The installer configures PHP-FPM; it does not change
+CLI PHP or configure the built-in server or FrankenPHP for you.
+
+With FrankenPHP, set `auto_prepend_file` in an INI file that FrankenPHP reads. A FrankenPHP
+worker keeps PHP state between requests, so the bridge stays off in worker mode.
 
 The framework must report one of these environment names:
 
@@ -419,7 +422,8 @@ The bridge itself has no runtime Composer dependencies. The test suite installs 
 dependencies in `tests/vendor`.
 
 To run the tests, you need PHP with OpenTelemetry and SQLite, Composer, Node, Python 3,
-Bash, and ShellCheck. The separate FPM test also needs a PHP-FPM binary.
+Bash, and ShellCheck. The separate FPM test also needs a PHP-FPM binary, and the FrankenPHP
+test a FrankenPHP binary.
 
 ```bash
 composer install --working-dir=tests
@@ -438,6 +442,9 @@ python3 tests/installer.py
 
 # Request state in an isolated, single-worker FPM pool.
 python3 tests/fpm-state.py /path/to/php-fpm
+
+# The bridge under FrankenPHP: on in classic mode, off in worker mode.
+python3 tests/frankenphp-state.py /path/to/frankenphp
 
 # Shell script checks.
 shellcheck install.sh
